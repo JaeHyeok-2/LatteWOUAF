@@ -678,7 +678,7 @@ def val(args, accelerator, weight_dtype, generation_scheduler, vae, mapping_netw
                     augmented_image_latent_0 = valid_aug((generated_image_latent_0 / 2 + 0.5).clamp(0, 1))
                 list_validation.extend(acc_calculation(args, phis, decoding_network, augmented_image_latent_0, bsz, vae).tolist())
                 # bit_Acc = acc_calculation(args, phis, decoding_network, augmented_image_latent_0, bsz, vae).tolist() 
-                print("BIT ACCURACY : {}   |||||  LPSIS :{}  |||| total_loss :{}".format(bit_acc, loss_lpips_reg, loss))
+                print("BIT ACCURACY : {}   |||||  LPSIS :{}  |||| Key_loss :{}".format(bit_acc, loss_lpips_reg, loss_key))
 
                 outputs = {'images': (generated_image / 2 + 0.5).clamp(0, 1), 'images_trainval': (generated_image_latent_0 / 2 + 0.5).clamp(0, 1)}
                 # for metric in metrics:
