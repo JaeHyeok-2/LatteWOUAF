@@ -609,6 +609,8 @@ def val(args, accelerator, weight_dtype, generation_scheduler, vae, mapping_netw
     list_validation = []
     list_txt_validation=[]
 
+
+    loss_fn_vgg = lpips.LPIPS(net='vgg').to(accelerator.device)
     #Change network eval mode
     vae.eval()
     mapping_network.eval()
@@ -655,6 +657,18 @@ def val(args, accelerator, weight_dtype, generation_scheduler, vae, mapping_netw
                     augmented_image = valid_aug((generated_image / 2 + 0.5).clamp(0, 1))
                 list_txt_validation.extend(acc_calculation(args, phis, decoding_network, augmented_image, bsz, vae).tolist())
 
+                reconstructed_keys = decoding_network(augmented_image)
+
+                #Key reconstruction loss = Element-wise BCE
+                loss_key = F.binary_cross_entropy_with_logits(reconstructed_keys, phis)
+                loss_lpips_reg = loss_fn_vgg.forward(generated_image, resize(mini_batch_train_gt)).mean()
+                loss = loss_key + loss_lpips_reg
+
+                #Calculate batch accuracy
+                gt_phi = (phis > 0.5).int()
+                reconstructed_keys = (torch.sigmoid(reconstructed_keys) > 0.5).int()
+                bit_acc = ((gt_phi == reconstructed_keys).sum(dim=1)) / args.phi_dimension
+
                 #Training's validation
                 
                 generated_image_latent_0 = resize(decode_latents(vae, mini_batch_latent_z, encoded_phis))
@@ -663,8 +677,8 @@ def val(args, accelerator, weight_dtype, generation_scheduler, vae, mapping_netw
                 else:
                     augmented_image_latent_0 = valid_aug((generated_image_latent_0 / 2 + 0.5).clamp(0, 1))
                 list_validation.extend(acc_calculation(args, phis, decoding_network, augmented_image_latent_0, bsz, vae).tolist())
-                bit_Acc = acc_calculation(args, phis, decoding_network, augmented_image_latent_0, bsz, vae).tolist() 
-                print(bit_Acc)
+                # bit_Acc = acc_calculation(args, phis, decoding_network, augmented_image_latent_0, bsz, vae).tolist() 
+                print("BIT ACCURACY : {}   |||||  LPSIS :{}  |||| total_loss :{}".format(bit_acc, loss_lpips_reg, loss))
 
                 outputs = {'images': (generated_image / 2 + 0.5).clamp(0, 1), 'images_trainval': (generated_image_latent_0 / 2 + 0.5).clamp(0, 1)}
                 # for metric in metrics:
