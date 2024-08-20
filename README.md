@@ -183,3 +183,4 @@ Based on that information, we estimate the following CO2 emissions using the [Ma
     }
 
 *This model card was written by: Robin Rombach, Patrick Esser and David Ha and is based on the [Stable Diffusion v1](https://github.com/CompVis/stable-diffusion/blob/main/Stable_Diffusion_v1_Model_Card.md) and [DALL-E Mini model card](https://huggingface.co/dalle-mini/dalle-mini).*# LatteWOUAF
+# LatteWOUAF
