@@ -5,11 +5,10 @@ from diffusers.utils import BaseOutput
 from typing import Any, Dict, List, Optional, Tuple, Union
 from diffusers.models.unet_2d_blocks import UNetMidBlock2D, UpDecoderBlock2D, CrossAttnDownBlock2D, DownBlock2D, UNetMidBlock2DCrossAttn, UpBlock2D, CrossAttnUpBlock2D
 from diffusers.models.resnet import ResnetBlock2D
-from diffusers.models.attention import AttentionBlock
-from diffusers.models.cross_attention import CrossAttention
+from diffusers.models.attention import Attention
+# from diffusers.models.cross_attention import CrossAttention
 from attribution import FullyConnectedLayer
 import math
-
 
 def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
     def add_affine_conv(vaed):
@@ -22,10 +21,10 @@ def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
 
     def add_affine_attn(vaed):
         for layer in vaed.children():
-            if type(layer) == AttentionBlock:
-                layer.affine_q = FullyConnectedLayer(phi_dimension, layer.query.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
-                layer.affine_k = FullyConnectedLayer(phi_dimension, layer.key.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
-                layer.affine_v = FullyConnectedLayer(phi_dimension, layer.value.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
+            if type(layer) == Attention:
+                layer.affine_q = FullyConnectedLayer(phi_dimension, layer.to_q.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
+                layer.affine_k = FullyConnectedLayer(phi_dimension, layer.to_k.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
+                layer.affine_v = FullyConnectedLayer(phi_dimension, layer.to_v.weight.shape[1], lr_multiplier=lr_multiplier, bias_init=1)
             else:
                 add_affine_attn(layer)
 
@@ -38,7 +37,9 @@ def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
                 change_forward(layer, layer_type, new_forward)
 
     def new_forward_MB(self, hidden_states, encoded_fingerprint, temb=None):
+        # print("Customization Line 39 hidden states' encoded shape :", hidden_states.shape, hidden_states.dtype, encoded_fingerprint.shape, encoded_fingerprint.dtype)
         hidden_states = self.resnets[0]((hidden_states, encoded_fingerprint), temb)
+        # print("After Resnet, hidden_states' Shape :", hidden_states.shape, hidden_states.dtype)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             if attn is not None:
                 hidden_states = attn((hidden_states, encoded_fingerprint))
@@ -119,48 +120,58 @@ def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
 
         # proj to q, k, v
         phis_q = self.affine_q(encoded_fingerprint)
-        query_proj = torch.bmm(hidden_states, phis_q.unsqueeze(-1) * self.query.weight.t().unsqueeze(0)) + self.query.bias
+        query_proj = torch.bmm(hidden_states, phis_q.unsqueeze(-1) * self.to_q.weight.t().unsqueeze(0)) + self.to_q.bias
 
         phis_k = self.affine_k(encoded_fingerprint)
-        key_proj = torch.bmm(hidden_states, phis_k.unsqueeze(-1) * self.key.weight.t().unsqueeze(0)) + self.key.bias
+        key_proj = torch.bmm(hidden_states, phis_k.unsqueeze(-1) * self.to_k.weight.t().unsqueeze(0)) + self.to_k.bias
 
         phis_v = self.affine_v(encoded_fingerprint)
-        value_proj = torch.bmm(hidden_states, phis_v.unsqueeze(-1) * self.value.weight.t().unsqueeze(0)) + self.value.bias
+        value_proj = torch.bmm(hidden_states, phis_v.unsqueeze(-1) * self.to_v.weight.t().unsqueeze(0)) + self.to_k.bias
 
-        scale = 1 / math.sqrt(self.channels / self.num_heads)
+        # scale = 1 / math.sqrt(self.channels / self.num_heads)
+        # print(self)
+        scale = self.scale
+        # query_proj = self.reshape_heads_to_batch_dim(query_proj)
+        # key_proj = self.reshape_heads_to_batch_dim(key_proj)
+        # value_proj = self.reshape_heads_to_batch_dim(value_proj)
+        query_proj = self.head_to_batch_dim(query_proj)
+        key_proj = self.head_to_batch_dim(key_proj)
+        value_proj = self.head_to_batch_dim(value_proj)
 
-        query_proj = self.reshape_heads_to_batch_dim(query_proj)
-        key_proj = self.reshape_heads_to_batch_dim(key_proj)
-        value_proj = self.reshape_heads_to_batch_dim(value_proj)
 
-        if self._use_memory_efficient_attention_xformers:
-            # Memory efficient attention
-            hidden_states = xformers.ops.memory_efficient_attention(
-                query_proj, key_proj, value_proj, attn_bias=None, op=self._attention_op
-            )
-            hidden_states = hidden_states.to(query_proj.dtype)
-        else:
-            attention_scores = torch.baddbmm(
-                torch.empty(
-                    query_proj.shape[0],
-                    query_proj.shape[1],
-                    key_proj.shape[1],
-                    dtype=query_proj.dtype,
-                    device=query_proj.device,
-                ),
-                query_proj,
-                key_proj.transpose(-1, -2),
-                beta=0,
-                alpha=scale,
-            )
-            attention_probs = torch.softmax(attention_scores.float(), dim=-1).type(attention_scores.dtype)
-            hidden_states = torch.bmm(attention_probs, value_proj)
+        # 자체적으로 사용함.
+        # if self._use_memory_efficient_attention_xformers:
+        #     # Memory efficient attention
+        #     hidden_states = xformers.ops.memory_efficient_attention(
+        #         query_proj, key_proj, value_proj, attn_bias=None, op=self._attention_op
+        #     )
+        #     hidden_states = hidden_states.to(query_proj.dtype)
+        # else:
+        #     attention_scores = torch.baddbmm(
+        #         torch.empty(
+        #             query_proj.shape[0],
+        #             query_proj.shape[1],
+        #             key_proj.shape[1],
+        #             dtype=query_proj.dtype,
+        #             device=query_proj.device,
+        #         ),
+        #         query_proj,
+        #         key_proj.transpose(-1, -2),
+        #         beta=0,
+        #         alpha=scale,
+        #     )
+        #     attention_probs = torch.softmax(attention_scores.float(), dim=-1).type(attention_scores.dtype)
+        #     hidden_states = torch.bmm(attention_probs, value_proj)
 
         # reshape hidden_states
-        hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+        # hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+        hidden_states = self.batch_to_head_dim(hidden_states)
 
         # compute next hidden_states
-        hidden_states = self.proj_attn(hidden_states)
+        # hidden_states = self.proj_attn(hidden_states)
+        hidden_states = self.to_out[0](hidden_states, 1)
+        hidden_states = self.to_out[1](hidden_states)
+
 
         hidden_states = hidden_states.transpose(-1, -2).reshape(batch, channel, height, width)
 
@@ -199,11 +210,14 @@ def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
         sample: torch.FloatTensor
 
     def new__decode(self, z: torch.FloatTensor, encoded_fingerprint: torch.Tensor, return_dict: bool = True) -> Union[DecoderOutput, torch.FloatTensor]:
+        # print("Original z :", z.shape, z.dtype)
         z = self.post_quant_conv(z)
+        # print("Quantized Latent z :",z.shape, z.dtype)
+        # print("encoded Fingerprint :", encoded_fingerprint.shape, encoded_fingerprint.dtype)
         dec = self.decoder(z, encoded_fingerprint)
 
-        if not return_dict:
-            return (dec,)
+        # if not return_dict:
+        #     return (dec,)
 
         return DecoderOutput(sample=dec)
 
@@ -224,7 +238,7 @@ def customize_vae_decoder(vae, phi_dimension, lr_multiplier):
     change_forward(vae.decoder, UNetMidBlock2D, new_forward_MB)
     change_forward(vae.decoder, UpDecoderBlock2D, new_forward_UDB)
     change_forward(vae.decoder, ResnetBlock2D, new_forward_RB)
-    change_forward(vae.decoder, AttentionBlock, new_forward_AB)
+    change_forward(vae.decoder, Attention, new_forward_AB)
     setattr(vae.decoder, 'forward', new_forward_vaed.__get__(vae.decoder, vae.decoder.__class__))
     setattr(vae, '_decode', new__decode.__get__(vae, vae.__class__))
     setattr(vae, 'decode', new_decode.__get__(vae, vae.__class__))

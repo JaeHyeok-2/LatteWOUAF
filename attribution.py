@@ -25,7 +25,11 @@ class FullyConnectedLayer(torch.nn.Module):
         self.bias_gain = lr_multiplier
 
     def forward(self, x):
-        w = self.weight.to(x.dtype) * self.weight_gain
+        if isinstance(x, torch.Tensor):
+            w = self.weight.to(x.dtype)
+            w = self.weight.to(x.dtype) * self.weight_gain
+        else: 
+            ㅈ = self.weight.to(x) *self.weight_gain
         b = self.bias
         if b is not None:
             b = b.to(x.dtype)

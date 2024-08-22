@@ -34,7 +34,7 @@ from accelerate.utils import set_seed
 from datasets import load_dataset, Image
 from diffusers import AutoencoderKL, StableDiffusionPipeline, UNet2DConditionModel, EulerDiscreteScheduler
 from diffusers.optimization import get_scheduler
-from diffusers.utils import randn_tensor
+from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils.import_utils import is_xformers_available
 from huggingface_hub import HfFolder, Repository, create_repo, whoami
 from torchvision import transforms
@@ -744,10 +744,10 @@ def main():
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
     )
     text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, torch_dtype=torch.float16
     )
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision
+        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, torch_dtype=torch.float16
     )
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
@@ -788,7 +788,7 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
-    mapping_network = MappingNetwork(args.phi_dimension, args.int_dimension, num_layers=args.mapping_layer)
+    mapping_network = MappingNetwork(args.phi_dimension, args.int_dimension, num_layers=args.mapping_layer).to(torch.float16)
     decoding_network = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
     decoding_network.fc = torch.nn.Linear(2048, args.phi_dimension)
 
@@ -799,7 +799,7 @@ def main():
 
     # For mixed precision training we cast the vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
+    weight_dtype = torch.float16
     if accelerator.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif accelerator.mixed_precision == "bf16":
@@ -1082,7 +1082,9 @@ def main():
 
                 # Sampling fingerprints and get the embeddings
                 phis = get_phis(args.phi_dimension, bsz).to(latents.device)
-                encoded_phis = mapping_network(phis)
+                encoded_phis = mapping_network(phis).to(weight_dtype)
+                print(latents.shape, encoded_phis.shape)
+                print(vae.dtype, latents.dtype, encoded_phis.dtype)
                 generated_image = decode_latents(vae, latents, encoded_phis)
 
                 generated_image = resize(generated_image)
@@ -1129,9 +1131,9 @@ def main():
                 train_loss = 0.0
 
                 if (global_step % args.checkpointing_steps) == 0:
-                    torch.save(accelerator.unwrap_model(vae).decoder.state_dict(), args.output_dir + "/vae_decoder.pth")
-                    torch.save(mapping_network.state_dict(), args.output_dir + "/mapping_network.pth")
-                    torch.save(decoding_network.state_dict(), args.output_dir + "/decoding_network.pth")
+                    torch.save(accelerator.unwrap_model(vae).decoder.state_dict(), args.output_dir + f"/vae_decoder_{args.phi_dimension}.pth")
+                    torch.save(mapping_network.state_dict(), args.output_dir + f"/mapping_network_{args.phi_dimension}.pth")
+                    torch.save(decoding_network.state_dict(), args.output_dir + f"/decoding_network_{args.phi_dimension}.pth")
 
             logs = {"loss_key": loss_key.detach().item(), "loss_lpips":loss_lpips_reg.item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -1144,31 +1146,31 @@ def main():
         print("Training Acc: Bit-wise Acc in Epoch {0}: {1}".format(epoch, train_acc))
         wandb.log({"Train Acc": train_acc.item()})
 
-        val(args, epoch, step, accelerator, weight_dtype, generation_scheduler, tokenizer, vae, mapping_network, decoding_network, test_dataloader, valid_aug, resize, metrics)
+        # val(args, epoch, step, accelerator, weight_dtype, generation_scheduler, tokenizer, vae, mapping_network, decoding_network, test_dataloader, valid_aug, resize, metrics)
         if global_step >= args.max_train_steps:
             break
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        vae = accelerator.unwrap_model(vae)
-        mapping_network = accelerator.unwrap_model(mapping_network)
-        decoding_network = accelerator.unwrap_model(decoding_network)
+    # if accelerator.is_main_process:
+    #     vae = accelerator.unwrap_model(vae)
+    #     mapping_network = accelerator.unwrap_model(mapping_network)
+    #     decoding_network = accelerator.unwrap_model(decoding_network)
 
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            text_encoder=text_encoder,
-            vae=vae,
-            unet=unet,
-            revision=args.revision,
-        )
-        pipeline.save_pretrained(args.output_dir)
+    #     pipeline = StableDiffusionPipeline.from_pretrained(
+    #         args.pretrained_model_name_or_path,
+    #         text_encoder=text_encoder,
+    #         vae=vae,
+    #         unet=unet,
+    #         revision=args.revision,
+    #     )
+    #     pipeline.save_pretrained(args.output_dir)
 
-        torch.save(mapping_network.state_dict(), args.output_dir + "/mapping_network.pth")
-        torch.save(decoding_network.state_dict(), args.output_dir + "/decoding_network.pth")
+    #     torch.save(mapping_network.state_dict(), args.output_dir + "/mapping_network.pth")
+    #     torch.save(decoding_network.state_dict(), args.output_dir + "/decoding_network.pth")
 
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
+    #     if args.push_to_hub:
+    #         repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
 
 
     accelerator.end_training()
